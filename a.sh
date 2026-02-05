@@ -1,6 +1,7 @@
 #!/bin/bash
 # ===============================================
-# Reverse Caddy to Apache, Set Up SSL, Reverse Proxy & Restore WordPress
+# Script to Add Reverse Proxy and Automatic SSL
+# Renewal for WordPress Website Running on Apache
 # ===============================================
 
 set -e
@@ -8,15 +9,17 @@ set -e
 # -------------------
 # USER CONFIGURATION
 # -------------------
-DOMAIN="sahmcore.com.sa"
-ADMIN_EMAIL="a.saeed@$DOMAIN"
-WP_PATH="/var/www/html"          # The original WordPress path
-PHP_VERSION="8.3"
-PHP_SOCKET="/run/php/php${PHP_VERSION}-fpm.sock"
-WP_CONFIG="$WP_PATH/wp-config.php"
+DOMAIN="sahmcore.com.sa"         # The domain of your WordPress site
+ADMIN_EMAIL="a.saeed@$DOMAIN"    # Admin email for SSL certs
+WEB_PATH="/var/www/html"          # The WordPress path
+APACHE_CONF_PATH="/etc/apache2/sites-available/000-default.conf" # Apache configuration file
 
-# Internal VM IPs for reverse proxy
-THIS_VM_IP="192.168.116.37"
+# SSL Configuration (Let's Encrypt)
+SSL_CERT_PATH="/etc/letsencrypt/live/$DOMAIN"
+SSL_CERT_FULLCHAIN="$SSL_CERT_PATH/fullchain.pem"
+SSL_CERT_PRIVKEY="$SSL_CERT_PATH/privkey.pem"
+
+# Internal VM IPs and Ports
 ERP_IP="192.168.116.13"
 ERP_PORT="8069"
 DOCS_IP="192.168.116.1"
@@ -27,157 +30,77 @@ NOMOGROW_IP="192.168.116.48"
 NOMOGROW_PORT="8082"
 VENTURA_IP="192.168.116.10"
 VENTURA_PORT="8080"
-
-# MySQL Credentials
-DB_NAME="sahmcore_wp"
-DB_USER="sahmcore_user"
-DB_PASS="SahmCore@2025"
+WEBADMIN_IP="192.168.116.1"
+WEBADMIN_PORT="9443"
+WEBMAIL_IP="192.168.116.1"
+WEBMAIL_PORT="444"
 
 # -------------------
-# SYSTEM UPDATE & DEPENDENCIES
+# SYSTEM UPDATE & INSTALL DEPENDENCIES
 # -------------------
 echo "[INFO] Updating system and installing dependencies..."
 sudo apt update && sudo apt upgrade -y
-sudo apt install -y curl wget unzip lsb-release software-properties-common net-tools ufw dnsutils git mariadb-client mariadb-server apache2 certbot python3-certbot-apache
+sudo apt install -y curl wget unzip lsb-release software-properties-common net-tools ufw dnsutils git certbot python3-certbot-apache
 
 # -------------------
-# STOP CADDY AND REMOVE CONFIGURATION
+# STOP NGINX AND CADDY IF RUNNING
 # -------------------
-echo "[INFO] Stopping and disabling Caddy..."
-sudo systemctl stop caddy
-sudo systemctl disable caddy
-sudo systemctl mask caddy
-
-echo "[INFO] Removing Caddy configuration..."
-sudo rm -f /etc/caddy/Caddyfile
-
-# -------------------
-# VERIFY AND RESTORE WORDPRESS FILES
-# -------------------
-echo "[INFO] Verifying WordPress installation at $WP_PATH..."
-
-# Ensure that the WordPress path exists
-if [ ! -d "$WP_PATH" ]; then
-    echo "[ERROR] WordPress path $WP_PATH does not exist!"
-    exit 1
-fi
-
-# Ensure correct permissions for the WordPress files
-sudo chown -R www-data:www-data $WP_PATH
-sudo find $WP_PATH -type d -exec chmod 755 {} \;
-sudo find $WP_PATH -type f -exec chmod 644 {} \;
+echo "[INFO] Stopping Nginx or Caddy if running..."
+sudo systemctl stop nginx || true
+sudo systemctl disable nginx || true
+sudo systemctl mask nginx || true
+sudo systemctl stop caddy || true
+sudo systemctl disable caddy || true
+sudo systemctl mask caddy || true
 
 # -------------------
-# RESTORE DATABASE
+# ENABLE APACHE MODULES
 # -------------------
-echo "[INFO] Restoring database..."
-
-# Ensure the database exists
-echo "[INFO] Creating the database $DB_NAME if it doesn't exist..."
-sudo mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS $DB_NAME;"
-
-# Import the existing database dump (if applicable)
-# You should place the backup file in the specified location
-echo "[INFO] Importing the database dump..."
-sudo mysql -u root -p $DB_NAME < /home/sahm/3478617_wpress0f72a664.sql
+echo "[INFO] Enabling required Apache modules..."
+sudo a2enmod proxy
+sudo a2enmod proxy_http
+sudo a2enmod ssl
+sudo a2enmod rewrite
+sudo systemctl restart apache2
 
 # -------------------
-# VERIFY wp-config.php
+# CREATE A REVERSE PROXY CONFIGURATION
 # -------------------
-echo "[INFO] Verifying wp-config.php..."
-if [ ! -f "$WP_CONFIG" ]; then
-    echo "[ERROR] wp-config.php is missing!"
-    exit 1
-fi
-
-# Ensure wp-config.php points to the correct database
-sudo sed -i "s/database_name_here/$DB_NAME/" $WP_CONFIG
-sudo sed -i "s/username_here/$DB_USER/" $WP_CONFIG
-sudo sed -i "s/password_here/$DB_PASS/" $WP_CONFIG
-
-# Update site URL if necessary
-sudo sed -i "s|define('WP_HOME', 'http://localhost');|define('WP_HOME', 'https://$DOMAIN');|" $WP_CONFIG
-sudo sed -i "s|define('WP_SITEURL', 'http://localhost');|define('WP_SITEURL', 'https://$DOMAIN');|" $WP_CONFIG
-
-# -------------------
-# APACHE CONFIGURATION
-# -------------------
-echo "[INFO] Creating Apache configuration for WordPress..."
-
-# Create Apache VirtualHost for WordPress
-sudo tee /etc/apache2/sites-available/$DOMAIN.conf > /dev/null << EOF
+echo "[INFO] Creating reverse proxy configuration for WordPress site..."
+sudo tee /etc/apache2/sites-available/$DOMAIN.conf > /dev/null <<EOF
 <VirtualHost *:80>
     ServerAdmin $ADMIN_EMAIL
     ServerName $DOMAIN
-    DocumentRoot $WP_PATH
+    DocumentRoot $WEB_PATH
 
-    # Redirect HTTP to HTTPS
+    # Reverse Proxy settings for Apache
+    ProxyPass / http://127.0.0.1:80/
+    ProxyPassReverse / http://127.0.0.1:80/
+
+    # Enable SSL (for Let's Encrypt SSL setup)
     Redirect permanent / https://$DOMAIN/
-
-    # Logging
-    ErrorLog \${APACHE_LOG_DIR}/error.log
-    CustomLog \${APACHE_LOG_DIR}/access.log combined
-
-    # PHP Configuration
-    <Directory $WP_PATH>
-        AllowOverride All
-        Require all granted
-    </Directory>
 </VirtualHost>
 
 <VirtualHost *:443>
     ServerAdmin $ADMIN_EMAIL
     ServerName $DOMAIN
-    DocumentRoot $WP_PATH
+    DocumentRoot $WEB_PATH
 
-    # SSL Configuration
     SSLEngine on
-    SSLCertificateFile /etc/letsencrypt/live/$DOMAIN/fullchain.pem
-    SSLCertificateKeyFile /etc/letsencrypt/live/$DOMAIN/privkey.pem
+    SSLCertificateFile $SSL_CERT_FULLCHAIN
+    SSLCertificateKeyFile $SSL_CERT_PRIVKEY
 
-    # Logging
-    ErrorLog \${APACHE_LOG_DIR}/error.log
-    CustomLog \${APACHE_LOG_DIR}/access.log combined
+    # Reverse Proxy settings for Apache
+    ProxyPass / http://127.0.0.1:80/
+    ProxyPassReverse / http://127.0.0.1:80/
 
-    # PHP Configuration
-    <Directory $WP_PATH>
-        AllowOverride All
-        Require all granted
-    </Directory>
+    # Other recommended security headers
+    Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set X-Frame-Options "SAMEORIGIN"
+    Header always set X-XSS-Protection "1; mode=block"
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
 </VirtualHost>
-EOF
-
-# Enable the site and SSL module
-echo "[INFO] Enabling Apache site and SSL module..."
-sudo a2ensite $DOMAIN.conf
-sudo a2enmod ssl
-sudo systemctl reload apache2
-
-# -------------------
-# SSL SETUP USING LET'S ENCRYPT
-# -------------------
-echo "[INFO] Setting up SSL using Let's Encrypt..."
-sudo certbot --apache -d $DOMAIN -d www.$DOMAIN --agree-tos --email $ADMIN_EMAIL --non-interactive
-
-# -------------------
-# FIREWALL SETUP
-# -------------------
-echo "[INFO] Configuring firewall..."
-sudo ufw --force reset
-sudo ufw default deny incoming
-sudo ufw default allow outgoing
-sudo ufw allow 22/tcp
-sudo ufw allow 80/tcp    # Allow HTTP for debugging
-sudo ufw allow 443/tcp   # Allow HTTPS for Let's Encrypt
-sudo ufw enable
-
-# -------------------
-# REVERSE PROXY CONFIGURATION
-# -------------------
-echo "[INFO] Setting up reverse proxy for other services..."
-
-# Edit Apache configuration to add reverse proxies
-sudo tee -a /etc/apache2/sites-available/$DOMAIN.conf > /dev/null << EOF
 
 # ERP Reverse Proxy
 <VirtualHost *:80>
@@ -213,48 +136,79 @@ sudo tee -a /etc/apache2/sites-available/$DOMAIN.conf > /dev/null << EOF
     ProxyPass / http://$VENTURA_IP:$VENTURA_PORT/
     ProxyPassReverse / http://$VENTURA_IP:$VENTURA_PORT/
 </VirtualHost>
+
+# Webadmin Reverse Proxy
+<VirtualHost *:80>
+    ServerName webadmin.$DOMAIN
+    ProxyPass / https://$WEBADMIN_IP:$WEBADMIN_PORT/
+    ProxyPassReverse / https://$WEBADMIN_IP:$WEBADMIN_PORT/
+</VirtualHost>
+
+# Webmail Reverse Proxy
+<VirtualHost *:80>
+    ServerName webmail.$DOMAIN
+    ProxyPass / https://$WEBMAIL_IP:$WEBMAIL_PORT/
+    ProxyPassReverse / https://$WEBMAIL_IP:$WEBMAIL_PORT/
+</VirtualHost>
 EOF
 
-# Enable Apache proxy modules and reload
-echo "[INFO] Enabling Apache proxy modules..."
-sudo a2enmod proxy proxy_http proxy_ftp proxy_balancer lbmethod_byrequests
+# Enable the new site configuration
+echo "[INFO] Enabling the new Apache site configuration..."
+sudo a2ensite $DOMAIN.conf
 sudo systemctl reload apache2
 
 # -------------------
-# ENABLE AUTOMATIC SSL RENEWAL
+# OBTAIN SSL CERTIFICATE FROM LET'S ENCRYPT
 # -------------------
-echo "[INFO] Enabling automatic SSL certificate renewal..."
+echo "[INFO] Obtaining SSL certificate from Let's Encrypt..."
+sudo certbot --apache -d $DOMAIN -d erp.$DOMAIN -d docs.$DOMAIN -d mail.$DOMAIN -d nomogrow.$DOMAIN -d ventura-tech.$DOMAIN -d webadmin.$DOMAIN -d webmail.$DOMAIN --email $ADMIN_EMAIL --agree-tos --non-interactive
+
+# -------------------
+# AUTOMATE CERTIFICATE RENEWAL
+# -------------------
+echo "[INFO] Setting up automatic SSL certificate renewal..."
 sudo systemctl enable certbot.timer
 sudo systemctl start certbot.timer
 
 # -------------------
-# FINAL DIAGNOSTICS
+# FIREWALL CONFIGURATION
 # -------------------
-echo "[INFO] Running diagnostics..."
+echo "[INFO] Configuring the firewall..."
+sudo ufw --force reset
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+sudo ufw allow 22/tcp  # Allow SSH for remote access
+sudo ufw allow 80/tcp  # Allow HTTP (for Let's Encrypt HTTP-01 challenge)
+sudo ufw allow 443/tcp # Allow HTTPS
+sudo ufw enable
 
-# Check if Apache is running
-echo "[INFO] Checking if Apache is running..."
-if systemctl is-active --quiet apache2; then
-    echo "[INFO] Apache is running."
-else
-    echo "[ERROR] Apache is NOT running!"
+# -------------------
+# FINAL CHECKS
+# -------------------
+echo "[INFO] Final checks..."
+
+# Check Apache status
+echo "[INFO] Checking Apache status..."
+sudo systemctl status apache2
+
+# Check Apache config
+echo "[INFO] Checking Apache config for syntax errors..."
+sudo apache2ctl configtest
+
+# Check SSL Certificate Paths
+echo "[INFO] Checking SSL certificate paths..."
+if [ ! -f "$SSL_CERT_FULLCHAIN" ] || [ ! -f "$SSL_CERT_PRIVKEY" ]; then
+    echo "[ERROR] SSL certificate files not found!"
     exit 1
+else
+    echo "[INFO] SSL certificates found!"
 fi
 
-# Check if PHP-FPM is running
-echo "[INFO] Checking if PHP-FPM is running..."
-if systemctl is-active --quiet php${PHP_VERSION}-fpm; then
-    echo "[INFO] PHP-FPM is running."
-else
-    echo "[ERROR] PHP-FPM is NOT running!"
-    exit 1
-fi
-
-# Check if SSL certificates are active
-echo "[INFO] Checking if SSL certificates are active..."
-sudo certbot certificates
+# Test Apache reverse proxy with SSL
+echo "[INFO] Testing reverse proxy with SSL..."
+curl -I https://$DOMAIN | head -n 10
 
 # -------------------
-# FINISH
+# COMPLETION
 # -------------------
-echo "[INFO] WordPress site and reverse proxy setup complete! You can access your site at https://$DOMAIN"
+echo "[INFO] Script completed. The website $DOMAIN should now be accessible via HTTPS with SSL certificates automatically renewed by Let's Encrypt."
