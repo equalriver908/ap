@@ -79,7 +79,7 @@ sudo mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS $DB_NAME;"
 # Import the existing database dump (if applicable)
 # You should place the backup file in the specified location
 echo "[INFO] Importing the database dump..."
-sudo mysql -u root -p $DB_NAME < /var/www/html/backup/wordpress_db.sql
+sudo mysql -u root -p $DB_NAME < /home/sahm/3478617_wpress0f72a664.sql
 
 # -------------------
 # VERIFY wp-config.php
